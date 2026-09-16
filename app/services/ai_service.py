@@ -18,8 +18,6 @@ import threading
 from time import monotonic, perf_counter
 from typing import Literal
 
-from transformers import pipeline
-
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -80,6 +78,18 @@ def _get_classifier():
 
     with _classifier_lock:
         if _classifier is None:
+            # Imported here, not at module scope: transformers pulls in torch,
+            # which adds several GB to the image. Deployments that run with
+            # AI_ENABLED=false install the slim requirements.txt and never
+            # reach this line, so the dependency stays optional.
+            try:
+                from transformers import pipeline
+            except ImportError as exc:  # pragma: no cover - depends on install extras
+                raise RuntimeError(
+                    "AI_ENABLED is true but 'transformers' is not installed. "
+                    "Install the optional extras with: pip install -r requirements-ai.txt"
+                ) from exc
+
             settings = get_settings()
             # Downloads ~1.6 GB on first run, then cached locally by HuggingFace.
             logger.info(

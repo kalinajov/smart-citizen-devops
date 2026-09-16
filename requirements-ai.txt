@@ -1,0 +1,12 @@
+# Optional AI extras — only needed when AI_ENABLED=true.
+#
+# These pull in torch (~2.5 GB), which is why they are kept out of the base
+# requirements.txt. Both imports are lazy (app/services/ai_service.py), so the
+# application starts and serves every non-AI route without them installed.
+#
+# Install with:  pip install -r requirements.txt -r requirements-ai.txt
+-r requirements.txt
+
+transformers>=4.40.0
+torch>=2.2.0
+openai>=1.0.0
