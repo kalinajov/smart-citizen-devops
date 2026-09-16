@@ -1,0 +1,126 @@
+# Continuous Integration
+#
+# Runs on every push and pull request:
+#   1. test  — pytest against a throwaway PostgreSQL service container
+#   2. build — builds the backend and frontend images and pushes them to GHCR
+#
+# The build job only starts if the tests pass, so a broken commit never
+# produces a published image.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  test:
+    name: Test backend
+    runs-on: ubuntu-latest
+
+    # GitHub starts this alongside the job and exposes it on localhost:5432.
+    # The job waits for the health check before the first step runs.
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: smart_citizen_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      # Only the slim requirements — the AI extras are not needed to run tests
+      # and would add several minutes of download time per run.
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pytest
+        env:
+          DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/smart_citizen_test
+          DEV_SKIP_AUTH: "true"
+          SUPABASE_MOCK_VERIFY: "true"
+          AI_ENABLED: "false"
+          AI_PRELOAD_ON_STARTUP: "false"
+        run: pytest tests/ -v
+
+  build:
+    name: Build and push ${{ matrix.component }}
+    runs-on: ubuntu-latest
+    needs: test
+
+    permissions:
+      contents: read
+      packages: write
+
+    # One job per image. Both run in parallel.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: backend
+            context: .
+            image: scrs-api
+          - component: frontend
+            context: ./frontend
+            image: scrs-web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Produces the tag list: the short SHA for traceability, the branch name,
+      # and 'latest' only on master. Also lowercases the owner, which GHCR requires.
+      - name: Derive image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}
+          tags: |
+            type=sha,format=short
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Vite inlines these at build time; only the frontend build reads them.
+          # The placeholders keep a fresh clone buildable: src/lib/supabase.ts
+          # throws on load if either value is empty, which would ship an image
+          # that renders a blank page. Set the repository secrets to enable
+          # real Supabase login — the cluster runs with DEV_SKIP_AUTH instead.
+          build-args: |
+            VITE_SUPABASE_URL=${{ secrets.SUPABASE_URL || 'https://placeholder.supabase.co' }}
+            VITE_SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY || 'placeholder-anon-key' }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,scope=${{ matrix.component }},mode=max

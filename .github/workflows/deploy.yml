@@ -1,8 +1,10 @@
 name: Deploy to Azure
 
+# Manual only. This pipeline needs an Azure subscription and the AZURE_*,
+# DATABASE_URL and SUPABASE_* secrets; without them it fails on every push and
+# buries the CI results in red. Run it from the Actions tab once those secrets
+# are configured.
 on:
-  push:
-    branches: [master, deployment-new]
   workflow_dispatch:
 
 env:
@@ -295,7 +297,7 @@ jobs:
               --target-port 8080 --ingress external \
               --min-replicas 0 --max-replicas 1 \
               --cpu 0.25 --memory 0.5Gi \
-              --env-vars "BACKEND_FQDN=$BACKEND_FQDN" \
+              --env-vars "BACKEND_FQDN=$BACKEND_FQDN" "BACKEND_SCHEME=https" \
               -o none
           else
             if [ -n "$GHCR_REG_USER" ]; then
@@ -304,7 +306,7 @@ jobs:
             fi
             az containerapp update -n "$FRONTEND_NAME" -g "$RESOURCE_GROUP" \
               --image "$IMAGE" \
-              --replace-env-vars "BACKEND_FQDN=$BACKEND_FQDN" \
+              --replace-env-vars "BACKEND_FQDN=$BACKEND_FQDN" "BACKEND_SCHEME=https" \
               -o none
           fi
 
