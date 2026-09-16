@@ -1,0 +1,77 @@
+# The Ingress is the cluster's front door. Services are only reachable from
+# inside the cluster; this is what maps an outside hostname and URL path onto
+# them, through the ingress-nginx controller.
+#
+# Split into two objects so API traffic can carry its own annotations (body
+# size) without applying them to the static bundle.
+#
+# Add the hostname to your hosts file before testing:
+#   127.0.0.1  smart-citizen.local
+
+# --- API traffic ------------------------------------------------------------
+# No path rewriting: /api/v1 is both the public prefix and FastAPI's own mount
+# point (settings.api_v1_str), and the frontend image is built with
+# VITE_API_BASE_URL=/api/v1 to match.
+#
+# That symmetry is what keeps redirects correct. FastAPI answers a request for
+# /api/v1/categories with a 307 to /api/v1/categories/ — an absolute path. Under
+# a rewriting Ingress the browser would follow it back through the rewrite and
+# land on /api/v1/v1/categories/. With the prefixes aligned there is nothing to
+# get wrong.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: smart-citizen-api
+  namespace: smart-citizen
+  labels:
+    app.kubernetes.io/name: backend
+    app.kubernetes.io/part-of: smart-citizen
+  annotations:
+    # Report attachments; keep in step with client_max_body_size in nginx.conf.template.
+    nginx.ingress.kubernetes.io/proxy-body-size: "6m"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: smart-citizen.local
+      http: &api-paths
+        paths:
+          - path: /api/v1
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8000
+    # Same routes under localhost, so the stack can be opened at
+    # http://localhost without an entry in the hosts file — editing that file
+    # needs Administrator rights. smart-citizen.local stays the real hostname.
+    - host: localhost
+      http: *api-paths
+
+---
+# --- Everything else --------------------------------------------------------
+# The React app, served verbatim. Its own nginx still proxies /static/ through
+# to the backend for uploaded files.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: smart-citizen-web
+  namespace: smart-citizen
+  labels:
+    app.kubernetes.io/name: frontend
+    app.kubernetes.io/part-of: smart-citizen
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: smart-citizen.local
+      http: &web-paths
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 8080
+    - host: localhost
+      http: *web-paths

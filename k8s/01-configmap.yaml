@@ -1,0 +1,42 @@
+# Non-sensitive settings, kept out of the images so the same image can run in
+# any environment. Every key here maps to a field on Settings in
+# app/core/config.py — pydantic-settings reads them from the environment,
+# case-insensitively.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: smart-citizen
+  labels:
+    app.kubernetes.io/part-of: smart-citizen
+data:
+  # The AI classifier needs torch, which is not in the slim runtime image.
+  # Leave this false unless the image is rebuilt with requirements-ai.txt.
+  AI_ENABLED: "false"
+  AI_PRELOAD_ON_STARTUP: "false"
+
+  # Real JWT verification requires live Supabase credentials. The demo cluster
+  # runs without them: every request is treated as the seeded admin user.
+  # Both of these MUST be false in anything resembling production.
+  DEV_SKIP_AUTH: "true"
+  SUPABASE_MOCK_VERIFY: "true"
+
+  # Requests arrive through the Ingress host, so that origin must be allowed.
+  # Must be a JSON array: pydantic-settings parses list-typed fields as JSON
+  # directly from the environment, before the comma-splitting validator in
+  # app/core/config.py ever runs.
+  BACKEND_CORS_ORIGINS: '["http://smart-citizen.local"]'
+
+---
+# Database connection settings that the Postgres container itself needs.
+# Split from app-config because the StatefulSet consumes these, not the API.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-config
+  namespace: smart-citizen
+  labels:
+    app.kubernetes.io/part-of: smart-citizen
+data:
+  POSTGRES_DB: smart_citizen
+  POSTGRES_USER: postgres

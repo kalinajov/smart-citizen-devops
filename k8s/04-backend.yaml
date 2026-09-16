@@ -1,0 +1,146 @@
+# Storage for user-uploaded files. The API mounts this at /app/uploads and
+# serves it back under /static/uploads (see app/main.py). It is a plain PVC
+# rather than a volumeClaimTemplate because this is a Deployment, not a
+# StatefulSet — one claim shared by the workload, not one per pod.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: uploads
+  namespace: smart-citizen
+  labels:
+    app.kubernetes.io/name: backend
+    app.kubernetes.io/part-of: smart-citizen
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: smart-citizen
+  labels:
+    app.kubernetes.io/name: backend
+    app.kubernetes.io/part-of: smart-citizen
+spec:
+  # Held at 1 on purpose. The uploads PVC is ReadWriteOnce, so it cannot be
+  # mounted read-write by pods on different nodes. Scaling the API out would
+  # require a ReadWriteMany volume or moving uploads to object storage.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: backend
+        app.kubernetes.io/part-of: smart-citizen
+    spec:
+      # The API opens a connection pool on startup. Without this gate the pod
+      # would crash-loop until Postgres finishes its first-run initdb.
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:18-alpine
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h postgres -p 5432 -U postgres; do
+                echo "waiting for postgres..."
+                sleep 2
+              done
+
+        # Creates the schema and lookup rows. The project has no migration
+        # tooling, so a freshly provisioned PersistentVolume would otherwise
+        # leave every endpoint returning 500. The script is idempotent, which
+        # is why it can run on each pod start rather than as a one-shot Job.
+        - name: bootstrap-db
+          image: scrs-api:local
+          imagePullPolicy: IfNotPresent
+          command: ["python", "scripts/bootstrap_db.py"]
+          envFrom:
+            - configMapRef:
+                name: app-config
+            - secretRef:
+                name: app-secrets
+
+      containers:
+        - name: api
+          image: scrs-api:local
+          # Local tag, resolved from the node's image store. Docker Desktop and
+          # the CI-built image share a daemon, so `docker compose build` is
+          # enough. To run the registry image instead, swap this for
+          #   ghcr.io/<owner>/scrs-api:latest
+          # and set imagePullPolicy: Always.
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 8000
+
+          # Plain settings and credentials arrive the same way — as environment
+          # variables — but live in two separate objects.
+          envFrom:
+            - configMapRef:
+                name: app-config
+            - secretRef:
+                name: app-secrets
+
+          volumeMounts:
+            - name: uploads
+              mountPath: /app/uploads
+
+          # /health touches neither the database nor disk, so a failure here
+          # means the process itself is wedged.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 768Mi
+
+      volumes:
+        - name: uploads
+          persistentVolumeClaim:
+            claimName: uploads
+
+---
+# Pods get new IPs every time they restart. This Service is the stable address
+# in front of them: anything in the cluster can reach the API at
+# http://backend:8000 no matter how often the pod behind it is replaced.
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: smart-citizen
+  labels:
+    app.kubernetes.io/name: backend
+    app.kubernetes.io/part-of: smart-citizen
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: backend
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

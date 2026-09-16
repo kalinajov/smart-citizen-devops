@@ -1,0 +1,10 @@
+# A namespace is a partition inside the cluster. Everything this project
+# creates lives in here, so it can be inspected with a single
+# `kubectl get all -n smart-citizen` and removed just as cleanly with
+# `kubectl delete namespace smart-citizen`.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: smart-citizen
+  labels:
+    app.kubernetes.io/part-of: smart-citizen

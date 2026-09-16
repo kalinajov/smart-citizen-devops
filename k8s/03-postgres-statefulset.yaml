@@ -1,0 +1,101 @@
+# A headless Service (clusterIP: None) gives each StatefulSet pod a stable DNS
+# name instead of load-balancing across them. With one replica that resolves to
+# postgres-0, reachable from any pod in the namespace as simply "postgres".
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: smart-citizen
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: smart-citizen
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+
+---
+# The database is a StatefulSet rather than a Deployment because it owns data.
+# A Deployment treats its pods as interchangeable and would happily replace one
+# with a fresh, empty copy. A StatefulSet gives each pod a stable identity and
+# binds it to its own PersistentVolumeClaim, so the data survives restarts,
+# rescheduling and image upgrades.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: smart-citizen
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: smart-citizen
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/part-of: smart-citizen
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:18-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+
+          # Settings come from the ConfigMap, the password from the Secret.
+          # Nothing credential-shaped is written in this file.
+          envFrom:
+            - configMapRef:
+                name: postgres-config
+            - secretRef:
+                name: app-secrets
+
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql
+
+          # Readiness gates traffic: the API's initContainer waits on this.
+          # Liveness restarts a hung server. pg_isready checks the socket
+          # rather than the process, so a deadlocked postgres is caught too.
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-d", "smart_citizen"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-d", "smart_citizen"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+
+  # Unlike a Deployment's volumes, this template makes Kubernetes provision one
+  # PersistentVolumeClaim per pod and reattach the same one after a restart.
+  # Deleting the StatefulSet does not delete these claims — that is deliberate.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi

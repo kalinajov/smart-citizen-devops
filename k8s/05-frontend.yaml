@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: smart-citizen
+  labels:
+    app.kubernetes.io/name: frontend
+    app.kubernetes.io/part-of: smart-citizen
+spec:
+  # Two replicas here, unlike the backend: nginx serves a static bundle and
+  # holds no state, so any replica can answer any request. This is what makes
+  # a Deployment the right primitive — the pods are interchangeable.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: frontend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: frontend
+        app.kubernetes.io/part-of: smart-citizen
+    spec:
+      containers:
+        - name: web
+          image: scrs-web:local
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 8080
+
+          env:
+            # Points the nginx proxy block at the backend Service. The Ingress
+            # sends /api/v1 straight to the API, so this path is only exercised
+            # for /static/ assets and by anything hitting the pod directly.
+            - name: BACKEND_SCHEME
+              value: http
+            - name: BACKEND_FQDN
+              value: backend:8000
+
+          # /healthz is answered by nginx itself and never reaches the backend,
+          # so frontend health stays independent of API health.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 192Mi
+
+---
+# Load-balances across both frontend replicas behind one stable name.
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: smart-citizen
+  labels:
+    app.kubernetes.io/name: frontend
+    app.kubernetes.io/part-of: smart-citizen
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: frontend
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
