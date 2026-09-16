@@ -1,36 +1,99 @@
+# Three-tier local stack: nginx/React frontend -> FastAPI backend -> PostgreSQL.
+#
+#   docker compose up --build
+#   open http://localhost:8080
+#
+# Auth is bypassed here (DEV_SKIP_AUTH=true) so the stack runs without real
+# Supabase credentials, and the AI classifier is off so the slim image is enough.
+name: smart-citizen
+
 services:
   db:
-    image: postgres:18
+    image: postgres:18-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: smart_citizen
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-smart_citizen}
+    # Published so you can inspect the database with psql/DBeaver from the host.
+    # The app does not need it — it reaches the DB over the Compose network.
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d smart_citizen"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-smart_citizen}"]
       interval: 5s
       timeout: 3s
       retries: 10
 
+  # Runs once, then exits. Creates the schema and inserts the lookup rows the
+  # API needs — without this a fresh volume comes up with no tables and every
+  # endpoint returns 500. Idempotent, so it is safe on every `up`.
+  db-init:
+    image: scrs-api:local
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-smart_citizen}
+      AI_ENABLED: "false"
+    command: ["python", "scripts/bootstrap_db.py"]
+    restart: "no"
+
   app:
-    build: .
+    build:
+      context: .
+    # Explicit tag so the Kubernetes manifests in k8s/ can reference the same
+    # image this build produces. Docker Desktop's cluster shares this daemon,
+    # so no push or load step is needed.
+    image: scrs-api:local
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
-    ports:
-      - "8000:8000"
+      db-init:
+        condition: service_completed_successfully
     environment:
-      # In-cluster name 'db' resolves via Compose DNS.
-      DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/smart_citizen
+      # Host 'db' resolves via Compose DNS. psycopg3 requires the +psycopg suffix.
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-smart_citizen}
       SUPABASE_MOCK_VERIFY: "true"
       DEV_SKIP_AUTH: "true"
       AI_ENABLED: "false"
       AI_PRELOAD_ON_STARTUP: "false"
+      # BACKEND_CORS_ORIGINS is left unset: the default in app/core/config.py
+      # already allows http://localhost:8080. If you ever do set it, note that
+      # pydantic-settings JSON-parses list fields straight from the environment,
+      # so it must be a JSON array — the comma-separated form the validator
+      # accepts never gets reached.
+    volumes:
+      - uploads_data:/app/uploads
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
+      retries: 5
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        # Vite bakes these in at build time. Placeholders keep the bundle
+        # buildable locally; set real values in .env to exercise Supabase login.
+        VITE_SUPABASE_URL: ${SUPABASE_URL:-https://placeholder.supabase.co}
+        VITE_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-placeholder-anon-key}
+    image: scrs-web:local
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      BACKEND_SCHEME: http
+      BACKEND_FQDN: app:8000
+    ports:
+      - "${WEB_PORT:-8080}:8080"
 
 volumes:
   postgres_data:
+  uploads_data:

@@ -4,6 +4,14 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
+    # Liveness/readiness target. Answers without touching the backend or disk,
+    # so a probe failure means nginx itself is down.
+    location = /healthz {
+        access_log off;
+        add_header Content-Type text/plain;
+        return 200 "ok\n";
+    }
+
     # gzip text assets — Vite's hashed bundles compress well
     gzip on;
     gzip_types text/css application/javascript application/json image/svg+xml;
@@ -20,11 +28,16 @@ server {
         add_header Cache-Control "no-store";
     }
 
-    # Proxy API to the internal backend Container App.
-    # Trailing slash on proxy_pass strips the /api/ prefix and substitutes /api/v1/,
-    # matching FastAPI's settings.api_v1_str mount point.
-    location /api/ {
-        proxy_pass         https://${BACKEND_FQDN}/api/v1/;
+    # Proxy API to the backend.
+    # BACKEND_SCHEME lets one image serve every environment: http for the
+    # Compose network and in-cluster Services, https for Azure Container Apps.
+    #
+    # The location and the proxy_pass target share the /api/v1 prefix on
+    # purpose. Because the path is not rewritten, FastAPI's absolute redirects
+    # (e.g. /api/v1/categories -> /api/v1/categories/) are already correct for
+    # the browser and need no proxy_redirect fix-up.
+    location /api/v1/ {
+        proxy_pass         ${BACKEND_SCHEME}://${BACKEND_FQDN}/api/v1/;
         proxy_http_version 1.1;
         proxy_set_header   Host                ${BACKEND_FQDN};
         proxy_set_header   X-Forwarded-For     $proxy_add_x_forwarded_for;
@@ -37,7 +50,7 @@ server {
 
     # Backend-served upload assets (PDFs/images uploaded by users).
     location /static/ {
-        proxy_pass         https://${BACKEND_FQDN}/static/;
+        proxy_pass         ${BACKEND_SCHEME}://${BACKEND_FQDN}/static/;
         proxy_http_version 1.1;
         proxy_set_header   Host                ${BACKEND_FQDN};
         proxy_ssl_server_name on;
