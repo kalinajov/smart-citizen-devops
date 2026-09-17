@@ -101,23 +101,22 @@ def _to_report_read(report: Report, db: Session | None = None) -> ReportRead:
     )
 
 def create_report(db: Session, *, report_in: ReportCreate, current_user: CurrentUser) -> ReportRead:
-    """Minimal placeholder create_report used by the router.
+    """Persist a new report and return the API view.
 
-    In the real app this would persist a Report and trigger AI classification / notifications.
+    AI classification + duplicate detection run asynchronously in
+    `run_report_ai_pipeline`, scheduled by the route as a BackgroundTask.
     """
-    _ = db
-    _ = current_user
-    _category_name = classify_text(report_in.description)
-    return ReportRead(
-        id=1,
+    report = Report(
         description=report_in.description,
-        category_id=None,
-        status_id=None,
-        user_id=current_user.id,
         latitude=report_in.latitude,
         longitude=report_in.longitude,
-        created_at=datetime.now(timezone.utc),
+        category_id=report_in.category_id,
+        user_id=current_user.id,
     )
+    db.add(report)
+    db.commit()
+    db.refresh(report)
+    return _to_report_read(report, db=db)
 
 def run_report_ai_pipeline(report_id: UUID) -> None:
     """
